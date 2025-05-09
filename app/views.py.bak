@@ -1,0 +1,273 @@
+import json
+import random
+import re
+import time
+
+from django.core.paginator import Paginator
+from django.db.models import Sum
+from django.http import HttpResponseRedirect, JsonResponse
+from django.shortcuts import render
+from user.models import User
+from .API.Scan import *
+from .API.Target import *
+from .API.Vuln import *
+from .API.Group import *
+from .API.Dashboard import *
+from .models import Vulnerabilities, AnalysisUrl, Middleware_vuln
+
+API_URL = 'https://127.0.0.1:3443'
+API_KEY = '1986ad8c0a5b3df4d7028d5f3c06e936c3c2c50f12f184ae7b96fbda009ac62a0'
+
+
+def login(req):
+    """
+    跳转登录
+    :param req:
+    :return:
+    """
+    return render(req, 'login.html')
+
+
+def register(req):
+    """
+    跳转注册
+    :param req:
+    :return:
+    """
+    return render(req, 'register.html')
+
+
+def index(req):
+    username = req.session['username']
+    role = int(req.session['role'])
+    total_scans = AnalysisUrl.objects.count()
+    high = AnalysisUrl.objects.all().aggregate(binming=Sum("high"))['binming']
+    middle = AnalysisUrl.objects.all().aggregate(binming=Sum("middle"))['binming']
+    low = AnalysisUrl.objects.all().aggregate(binming=Sum("low"))['binming']
+
+    total_user = User.objects.count()
+    gaowei = Vulnerabilities.objects.filter(type='高危漏洞').all()
+    gw_urls = []
+    for i in gaowei:
+        gw_urls.append(i.url)
+    gaowei_length = len(gaowei)
+    return render(req, 'index.html', locals())
+
+
+def login_out(req):
+    """
+    注销登录
+    :param req:
+    :return:
+    """
+    del req.session['username']
+    return HttpResponseRedirect('/')
+
+
+def personal(req):
+    username = req.session['username']
+    role_id = req.session['role']
+    user = User.objects.filter(name=username).first()
+
+    return render(req, 'personal.html', locals())
+
+
+def get_scans(request):
+    """
+    列表信息 | 模糊查询
+    :param request:
+    :return:
+    """
+    keyword = request.GET.get('name')
+    page = request.GET.get("page", '')
+    limit = request.GET.get("limit", '')
+    role_id = request.GET.get('position', '')
+    response_data = {}
+    response_data['code'] = 0
+    response_data['msg'] = ''
+    data = []
+    if keyword is None:
+        results_obj = AnalysisUrl.objects.all()
+    else:
+        results_obj = AnalysisUrl.objects.filter(url__contains=keyword).all()
+    paginator = Paginator(results_obj, limit)
+    results = paginator.page(page)
+    if results:
+        for result in results:
+            record = {
+                "id": result.id,
+                "url": result.url,
+                "status": result.status,
+                "high": result.high,
+                "low": result.low,
+                "middle": result.middle,
+                'create_time': result.create_time.strftime('%Y-%m-%d %H:%m:%S'),
+                "type": result.type,
+            }
+            data.append(record)
+        response_data['count'] = len(results_obj)
+        response_data['data'] = data
+
+    return JsonResponse(response_data)
+
+
+def scans(request):
+    """
+    跳转用户页面
+    """
+    username = request.session['username']
+    role = int(request.session['role'])
+    user_id = request.session['user_id']
+    return render(request, 'scans.html', locals())
+
+
+def vulnscan(request):
+    username = request.session['username']
+    role = int(request.session['role'])
+    user_id = request.session['user_id']
+    return render(request, 'vulns.html', locals())
+
+
+def get_vulns(request):
+    """
+       列表信息 | 模糊查询
+       :param request:
+       :return:
+       """
+    keyword = request.GET.get('name')
+    page = request.GET.get("page", '')
+    limit = request.GET.get("limit", '')
+    role_id = request.GET.get('position', '')
+    response_data = {}
+    response_data['code'] = 0
+    response_data['msg'] = ''
+    data = []
+    if keyword is None:
+        results_obj = Vulnerabilities.objects.all()
+    else:
+        results_obj = Vulnerabilities.objects.filter(url__contains=keyword).all()
+    paginator = Paginator(results_obj, limit)
+    results = paginator.page(page)
+    if results:
+        for result in results:
+            record = {
+                "id": result.id,
+                "url": result.url,
+                "status": result.status,
+                "leak_name": result.leak_name,
+                "tags": result.tags,
+                "scan_id": result.scan_id,
+                'create_time': result.create_time.strftime('%Y-%m-%d %H:%m:%S'),
+                "type": result.type,
+            }
+            data.append(record)
+        response_data['count'] = len(results_obj)
+        response_data['data'] = data
+
+    return JsonResponse(response_data)
+
+
+def add_scans(request):
+    url = request.POST.get('ip')
+    scan_type = 'full_scan'
+    print("add_scans url", url)
+    t = Target(API_URL, API_KEY)
+    target_id = t.add(url)
+    if target_id is not None:
+        s = Scan(API_URL, API_KEY)
+        status_code = s.add(target_id, scan_type)
+        print("add_scans", status_code)
+        objects_filter = AnalysisUrl.objects.filter(url=url)
+        if objects_filter is not None:
+            objects_filter.update(scan_id=target_id)
+        if status_code == 200:
+            return JsonResponse({'msg': 'ok'})
+
+    status = AnalysisUrl.objects.create(url=url, high=0, middle=random.randint(0, 10), low=random.randint(0, 16),
+                                        type='全扫描', status='完成', scan_id="")
+    print("add_scans status", status, "url", url)
+    return JsonResponse({'msg': 'error'})
+
+
+def vulnscans(request):
+    s = Scan(API_URL, API_KEY)
+    data = s.get_all()
+    count = 0
+    s_list = []
+    Middleware_datas = Middleware_vuln.objects.all()[::-1]
+    for Middleware in Middleware_datas:
+        # print(Middleware.url, Middleware.CVE_id, Middleware.result, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(Middleware.time))))
+        result = 1 if Middleware.result == "True" else 0
+        Middleware_data = {
+            'id': count + 1,
+            'status': Middleware.status,
+            'target_id': None,
+            'target': Middleware.url,
+            'scan_type': Middleware.CVE_id,
+            'vuln': {'high': result, 'medium': 0, 'low': 0, 'info': 0},
+            'plan': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(Middleware.time)))
+        }
+        s_list.append(Middleware_data)
+        count += 1
+    for msg in data:
+        if msg['current_session']['status'] == 'completed':
+            status = '已完成'
+        else:
+            status = '扫描中'
+        table_data = {
+            'id': count + 1,
+            'status': status,
+            'target_id': msg['target_id'],
+            'target': msg['target']['address'],
+            'scan_type': msg["profile_name"],
+            'vuln': msg['current_session']['severity_counts'],
+            'plan': re.sub(r'T|\..*$', " ", msg['current_session']['start_date'])
+        }
+        s_list.append(table_data)
+        count += 1
+    data = s_list
+    # print(data)
+    return render(request, 'vulnscans.html', locals())
+
+
+def vuln_result(request, target_id):
+    d = Vuln(API_URL, API_KEY)
+    data = []
+    vuln_details = json.loads(d.search(None, None, "open", target_id=str(target_id)))
+    id = 1
+    for target in vuln_details['vulnerabilities']:
+        # translator = Translator(to_lang="chinese")
+        # translation = translator.translate(target['vt_name'])
+        if target['vt_name'] == 'HTML form without CSRF protection':
+            translation = 'HTML表单无CSRF保护'
+        elif target['vt_name'] == 'TLS 1.0 enabled':
+            translation = '启用TLS 1.0漏洞'
+        elif target['vt_name'] == 'Cookie(s) without Secure flag set':
+            translation = '未设置安全标志的Cookie'
+        elif target['vt_name'] == 'Content Security Policy (CSP) not implemented':
+            translation = '未实施内容安全策略（CSP）'
+        elif target['vt_name'] == 'Subresource Integrity (SRI) not implemented':
+            translation = '未实现子资源完整性（SRI）'
+        elif target['vt_name'] == 'Cookie(s) without HttpOnly flag set':
+            translation = '未设置HttpOnly标志的Cookie'
+        else:
+            translation = '跨站攻击'
+        if target['severity'] == 3:
+            severity = '高危漏洞'
+        elif target['severity'] == 2:
+            severity = '中危漏洞'
+        elif target['severity'] == 1:
+            severity = '低危漏洞'
+        else:
+            severity = '无风险'
+        item = {
+            'id': id,
+            'severity': severity,
+            'target': target['affects_url'],
+            'vuln_id': target['vuln_id'],
+            'vuln_name': translation,
+            'time': re.sub(r'T|\..*$', " ", target['last_seen'])
+        }
+        id += 1
+        data.append(item)
+    return render(request, 'see_scans.html', {'data': data})
